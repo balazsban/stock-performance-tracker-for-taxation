@@ -21,6 +21,9 @@ def connect():
     columns={r['name'] for r in c.execute('PRAGMA table_info(transactions)')}
     for name in ['dkk_total','fx_mode','fx_rate','fx_date','fx_source','broker']:
         if name not in columns: c.execute(f'ALTER TABLE transactions ADD COLUMN {name} TEXT')
+    if 'sort_order' not in columns:
+        c.execute('ALTER TABLE transactions ADD COLUMN sort_order INTEGER')
+    c.execute('UPDATE transactions SET sort_order=id WHERE sort_order IS NULL')
     c.execute('CREATE TABLE IF NOT EXISTS fx_cache (currency TEXT, trade_date TEXT, rate_date TEXT, rate TEXT, source TEXT, PRIMARY KEY(currency,trade_date))')
     c.commit()
     return c
@@ -41,7 +44,7 @@ def validate(d):
 
 def calculate(rows):
     positions, annual, realized, history = {}, {}, {}, []
-    for raw in sorted(rows, key=lambda t:(t['date'],t['id'])):
+    for raw in sorted(rows, key=lambda t:(t['date'],t.get('sort_order') if t.get('sort_order') is not None else t['id'],t['id'])):
         t = dict(raw); key = (t['ticker'], t['currency'])
         p = positions.setdefault(key, {'ticker':key[0], 'currency':key[1], 'quantity':Decimal(0), 'basis':Decimal(0)})
         q, price, fee = (Decimal(t[k]) for k in ['quantity','price','fees'])
@@ -114,7 +117,25 @@ def portfolio_report(records):
     return report
 
 
-def rows(c): return [dict(r) for r in c.execute('SELECT * FROM transactions ORDER BY date,id')]
+def rows(c): return [dict(r) for r in c.execute('SELECT * FROM transactions ORDER BY date,sort_order,id')]
+
+def reorder_day(c, payload):
+    day, ticker = payload.get('date'), payload.get('ticker')
+    current = [dict(r) for r in c.execute(
+        'SELECT * FROM transactions WHERE date=? AND ticker=? ORDER BY sort_order,id', (day,ticker))]
+    before = [r['id'] for r in current]
+    requested = payload.get('ids')
+    if (not isinstance(requested,list) or any(type(i) is not int for i in requested)
+            or len(requested)!=len(before) or set(requested)!=set(before) or not before):
+        raise ValueError('Include every trade for this ticker and date exactly once. Reload and try again.')
+    if payload.get('expected_ids') != before:
+        raise ValueError('This day’s trades changed since you opened the order editor. Close it and try again.')
+    # Slot values are unique after migration/new entry. Other tickers keep their slots.
+    slots = sorted(r['sort_order'] for r in current)
+    for ident, slot in zip(requested, slots):
+        c.execute('UPDATE transactions SET sort_order=? WHERE id=?', (slot,ident))
+    # The enclosing transaction rolls back all slots if any historical balance is negative.
+    return portfolio_report(rows(c))
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -141,7 +162,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200,f.getvalue(),'text/csv')
         elif path == '/api/export':
             with connect() as c: data = rows(c)
-            f=io.StringIO(); w=csv.DictWriter(f,fieldnames=['id','date','ticker','currency','side','quantity','price','fees','note','dkk_total','fx_mode','fx_rate','fx_date','fx_source','broker']); w.writeheader(); w.writerows(data)
+            f=io.StringIO(); w=csv.DictWriter(f,fieldnames=['id','date','ticker','currency','side','quantity','price','fees','note','dkk_total','fx_mode','fx_rate','fx_date','fx_source','broker','sort_order']); w.writeheader(); w.writerows(data)
             self.send(200,f.getvalue(),'text/csv')
         elif path in ['/','/app.js','/style.css']:
             name = 'index.html' if path=='/' else path[1:]
@@ -152,6 +173,15 @@ class Handler(BaseHTTPRequestHandler):
             origin = self.headers.get('Origin')
             if origin and origin != 'http://'+self.headers.get('Host',''): raise ValueError('Cross-origin changes are not allowed.')
             path=urlparse(self.path).path
+            if path == '/api/transactions/reorder':
+                if self.command != 'POST': return self.send(405,{'error':'Use POST to reorder trades.'})
+                length=int(self.headers.get('Content-Length','0'))
+                if length > 100000: raise ValueError('Request too large.')
+                payload=json.loads(self.rfile.read(length))
+                with connect() as c:
+                    c.execute('BEGIN IMMEDIATE')
+                    result=reorder_day(c,payload)
+                return self.send(200,result)
             ident=None
             if path != '/api/transactions':
                 m=re.fullmatch(r'/api/transactions/(\d+)',path)
@@ -167,6 +197,8 @@ class Handler(BaseHTTPRequestHandler):
                     if length > 10000: raise ValueError('Request too large.')
                     previous=dict(c.execute('SELECT * FROM transactions WHERE id=?',(ident,)).fetchone()) if ident else None
                     d=prepare(json.loads(self.rfile.read(length)),c,previous)
+                    if self.command=='POST':
+                        d['sort_order']=c.execute('SELECT COALESCE(MAX(sort_order),0)+1 FROM transactions').fetchone()[0]
                     if self.command=='POST': c.execute('INSERT INTO transactions ('+','.join(d)+') VALUES ('+','.join('?' for _ in d)+')',list(d.values()))
                     else: c.execute('UPDATE transactions SET '+','.join(k+'=?' for k in d)+' WHERE id=?',list(d.values())+[ident])
                 result=portfolio_report(rows(c))

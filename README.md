@@ -115,7 +115,8 @@ Ignoring fees, the realized profit is **DKK 200**. The app converts each transac
 
 ### Dates, precision, and edits
 
-- Entries are processed by transaction date, then original entry ID for transactions on the same day.
+- Entries are processed by transaction date, then saved trade order for transactions on the same day.
+- Use **Order day** in transaction history to arrange all trades for one ticker and date, earliest first. Save applies the entire proposed sequence atomically and recalculates every later trade; negative holdings reject the change without saving any part of it. Existing trades retain their entry order until reordered. New trades append to the day; ordinary edits preserve order. The transaction CSV includes `sort_order`.
 - A sale's transaction year determines the calendar year of its realized result.
 - Every change recalculates the history. Any resulting oversell causes the change to roll back.
 - Inputs support up to 12 decimal places. The interface displays money to 2 decimal places, averages to 4, and share quantities to 6; underlying calculations retain greater precision.

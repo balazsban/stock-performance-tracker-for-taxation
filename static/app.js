@@ -27,7 +27,7 @@ function rateLabel(x){
  if(x.currency==='DKK')return 'DKK · no conversion';
  return `<a href="https://nationalbanken.statbank.dk/DNVALD" target="_blank" rel="noopener">Nationalbank · ${esc(x.fx_date)}</a><small>1 ${esc(x.currency)} = ${num(x.fx_rate,6)} DKK${x.fx_date!==x.date?' · prior banking day':''}</small>`;
 }
-function renderHistory(){const data=portfolio.transactions.filter(x=>x.ticker.includes($('search').value.trim().toUpperCase()));$('transactions').innerHTML=data.map(x=>`<tr><td>${esc(x.date)}</td><td title="${esc(x.note)}">${esc(x.ticker)} <small>${esc(x.currency)}</small><small style="display:block;font-weight:400">${esc(x.broker||'')}</small></td><td><span class="badge ${x.side==='SELL'?'sell':''}">${x.side}</span></td><td>${num(x.quantity,6)}</td><td>${x.price===''?'—':num(x.price,4)}</td><td>${x.fees===''?'—':num(x.fees)}</td><td>${x.dkk_total==null?'—':num(x.dkk_total)}</td><td class="source">${rateLabel(x)}</td><td>${x.average===null?'—':num(x.average,4)}</td><td>${x.profit===null?'—':gain(x.profit)}</td><td><button class="secondary" data-edit="${x.id}">Edit</button><button class="secondary" data-delete="${x.id}">Delete</button></td></tr>`).join('')||empty(11,'No transactions to show.');}
+function renderHistory(){const data=portfolio.transactions.filter(x=>x.ticker.includes($('search').value.trim().toUpperCase()));$('transactions').innerHTML=data.map(x=>`<tr><td>${esc(x.date)}</td><td title="${esc(x.note)}">${esc(x.ticker)} <small>${esc(x.currency)}</small><small style="display:block;font-weight:400">${esc(x.broker||'')}</small></td><td><span class="badge ${x.side==='SELL'?'sell':''}">${x.side}</span></td><td>${num(x.quantity,6)}</td><td>${x.price===''?'—':num(x.price,4)}</td><td>${x.fees===''?'—':num(x.fees)}</td><td>${x.dkk_total==null?'—':num(x.dkk_total)}</td><td class="source">${rateLabel(x)}</td><td>${x.average===null?'—':num(x.average,4)}</td><td>${x.profit===null?'—':gain(x.profit)}</td><td><button class="secondary" data-order="${x.id}" ${portfolio.transactions.filter(t=>t.date===x.date&&t.ticker===x.ticker).length<2?'disabled':''}>Order day</button><button class="secondary" data-edit="${x.id}">Edit</button><button class="secondary" data-delete="${x.id}">Delete</button></td></tr>`).join('')||empty(11,'No transactions to show.');}
 let quoteVersion=0;
 function formMode(){
  const f=$('form').elements, manual=f.fx_mode.value==='manual';
@@ -53,5 +53,26 @@ $('previewrate').onclick=async()=>{
 };
 $('add').onclick=()=>openForm();$('close').onclick=()=>$('modal').close();$('year').onchange=renderReports;$('search').oninput=renderHistory;
 $('form').onsubmit=async e=>{e.preventDefault();$('save').disabled=true;$('save').textContent='Saving…';try{portfolio=await request('/api/transactions'+(editId?'/'+editId:''),editId?'PUT':'POST',Object.fromEntries(new FormData(e.target)));render();$('modal').close();$('error').textContent='';}catch(e){$('formerror').textContent=e.message;}finally{$('save').disabled=false;$('save').textContent='Save transaction';}};
-$('transactions').onclick=async e=>{const edit=e.target.dataset.edit,del=e.target.dataset.delete;if(edit)openForm(portfolio.transactions.find(x=>x.id===Number(edit)));if(del&&confirm('Delete this transaction? The entire history will be recalculated.')){try{portfolio=await request('/api/transactions/'+del,'DELETE');render();$('error').textContent='';}catch(e){$('error').textContent=e.message;}}};
+$('transactions').onclick=async e=>{const edit=e.target.dataset.edit,del=e.target.dataset.delete,order=e.target.dataset.order;if(order)openOrder(Number(order));if(edit)openForm(portfolio.transactions.find(x=>x.id===Number(edit)));if(del&&confirm('Delete this transaction? The entire history will be recalculated.')){try{portfolio=await request('/api/transactions/'+del,'DELETE');render();$('error').textContent='';}catch(e){$('error').textContent=e.message;}}};
 request('/api/portfolio').then(d=>{portfolio=d;render()}).catch(e=>$('error').textContent='Could not load the ledger: '+e.message);
+
+let orderedTrades=[], originalOrder=[], orderGroup=null;
+function openOrder(id){
+ const trade=portfolio.transactions.find(t=>t.id===id);
+ orderGroup={date:trade.date,ticker:trade.ticker};
+ orderedTrades=portfolio.transactions.filter(t=>t.date===trade.date&&t.ticker===trade.ticker).sort((a,b)=>(a.sort_order??a.id)-(b.sort_order??b.id)||a.id-b.id);
+ originalOrder=orderedTrades.map(t=>t.id);
+ $('ordertitle').textContent=`${trade.ticker} · ${trade.date}`;
+ $('ordererror').textContent='';renderOrder();$('ordermodal').showModal();
+}
+function renderOrder(){
+ $('orderlist').innerHTML=orderedTrades.map((t,i)=>`<li><span><b>${i+1}. ${esc(t.side)} ${num(t.quantity,6)} shares</b><small>${t.dkk_total==null?'Missing DKK':num(t.dkk_total)+' DKK'} · ${esc(t.broker||'No broker')} · Trade #${t.id}</small></span><span><button class="secondary" data-position="${i}" data-step="-1" aria-label="Move trade ${t.id} earlier" ${i===0?'disabled':''}>↑ Earlier</button><button class="secondary" data-position="${i}" data-step="1" aria-label="Move trade ${t.id} later" ${i===orderedTrades.length-1?'disabled':''}>↓ Later</button></span></li>`).join('');
+}
+$('orderlist').onclick=e=>{if(e.target.dataset.position===undefined)return;const i=Number(e.target.dataset.position),j=i+Number(e.target.dataset.step);if(j<0||j>=orderedTrades.length)return;[orderedTrades[i],orderedTrades[j]]=[orderedTrades[j],orderedTrades[i]];renderOrder();$('ordererror').textContent='';};
+$('orderclose').onclick=()=>$('ordermodal').close();
+$('ordersave').onclick=async()=>{
+ $('ordersave').disabled=true;$('orderclose').disabled=true;$('orderlist').inert=true;
+ try{portfolio=await request('/api/transactions/reorder','POST',{...orderGroup,ids:orderedTrades.map(t=>t.id),expected_ids:originalOrder});render();$('ordermodal').close();$('error').textContent='';}
+ catch(e){$('ordererror').textContent=e.message;}
+ finally{$('ordersave').disabled=false;$('orderclose').disabled=false;$('orderlist').inert=false;}
+};

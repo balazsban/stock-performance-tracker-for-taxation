@@ -1,0 +1,30 @@
+# Local financial records and SQLite sidecar files
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-*
+*.sqlite3-*
+*.db-*
+*.csv
+
+# Python runtime and development environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Machine-specific settings and secrets
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
+
+# Local backups and scratch files
+backups/
+work/
+*.log

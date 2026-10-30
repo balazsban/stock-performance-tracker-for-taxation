@@ -28,3 +28,9 @@ htmlcov/
 backups/
 work/
 *.log
+
+build/
+dist/
+*.app/
+*.instance.lock
+.migration.lock

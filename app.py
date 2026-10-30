@@ -1,15 +1,20 @@
 import json, sqlite3, re, os, csv, io
 from pathlib import Path
-from decimal import Decimal, InvalidOperation, getcontext
+from decimal import Decimal, InvalidOperation, getcontext, DefaultContext
 from datetime import date
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import fx
+import storage
+import logging
+DefaultContext.prec = 40
 getcontext().prec = 40
 ROOT = Path(__file__).resolve().parent
-DB = Path(os.environ.get('LEDGER_DB', str(ROOT / 'ledger.sqlite3')))
+DB = storage.database_path()
 
 def connect():
+    if DB == storage.database_path():
+        storage.prepare_database(DB, ROOT / 'ledger.sqlite3' if not os.environ.get('LEDGER_DB') else None)
     c = sqlite3.connect(DB)
     c.row_factory = sqlite3.Row
     c.execute('CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, ticker TEXT NOT NULL, currency TEXT NOT NULL, side TEXT NOT NULL, quantity TEXT NOT NULL, price TEXT NOT NULL, fees TEXT NOT NULL, note TEXT NOT NULL)')
@@ -112,6 +117,8 @@ def portfolio_report(records):
 def rows(c): return [dict(r) for r in c.execute('SELECT * FROM transactions ORDER BY date,id')]
 
 class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        logging.info(fmt, *args)
     def send(self, status, body, content='application/json'):
         data = (json.dumps(body, default=str) if content == 'application/json' else body).encode()
         self.send_response(status); self.send_header('Content-Type', content+'; charset=utf-8'); self.send_header('Content-Length', str(len(data))); self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(data)
@@ -172,5 +179,9 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == '__main__':
     with connect(): pass
     port=int(os.environ.get('PORT','8765'))
-    print(f'Stock Ledger running at http://127.0.0.1:{port}',flush=True)
-    HTTPServer(('127.0.0.1',port),Handler).serve_forever()
+    server = HTTPServer(('127.0.0.1',port),Handler)
+    print(f'Stock Ledger running at http://127.0.0.1:{server.server_port}',flush=True)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()

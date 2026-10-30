@@ -19,7 +19,38 @@ A local web app for recording stock purchases and sales, tracking average purcha
 - **Persistent storage:** SQLite stores transactions and cached exchange rates across restarts.
 - **Audit export:** download original amounts, final DKK totals, and exchange-rate provenance as CSV.
 
-## Quick start
+## Mac app
+
+The desktop launcher bundles Python and opens the existing browser interface. On Apple Silicon, double-click **Stock Ledger.app**. A **◈ Ledger** menu appears in the menu bar with **Open Stock Ledger**, **Show Data Folder**, and **Quit Stock Ledger**. Closing the browser does not stop the app; use the menu to quit.
+
+Your database is stored outside the app at:
+
+```text
+~/Library/Application Support/Stock Ledger/ledger.sqlite3
+```
+
+This location is shared by the Mac app and the Python version. It stays the same across restarts, app moves, and app replacements, for the same macOS user. Replacing the `.app` does not replace your records. Deleting this data folder or moving to a different Mac/user requires restoring or copying a backup.
+
+The launcher opens the existing instance on repeated launches. If port 8765 is busy, it chooses a free local port and opens the correct URL automatically.
+
+### Build the Mac app
+
+Build on an Apple Silicon Mac with Python 3.10+:
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-mac.txt
+python -m PyInstaller --noconfirm StockLedger.spec
+```
+
+The result is `dist/Stock Ledger.app`. The current spec targets `arm64`; an Intel release needs an Intel-compatible Python/dependency environment and an appropriate target architecture. The bundle includes trusted certificate roots for HTTPS exchange-rate requests. Local builds are ad-hoc signed, not Developer ID signed or notarized; distributing a release to other Macs requires the appropriate signing/notarization workflow for a smooth first launch.
+
+### Moving an existing ledger
+
+Python launches automatically copy a legacy `ledger.sqlite3` beside `app.py` into the durable folder **only if the destination does not already exist**. For a first packaged launch, place a legacy `ledger.sqlite3` alongside `Stock Ledger.app` to migrate it. Migration uses SQLite's backup API, validates the copy, and leaves the original untouched. Existing destination databases are never overwritten or merged automatically.
+
+## Quick start (Python)
 
 Requires **Python 3.10 or newer** and a modern browser. There are no third-party Python packages, API keys, or frontend build steps.
 
@@ -113,7 +144,7 @@ Sources: [Nationalbank historical rates](https://nationalbanken.statbank.dk/DNVA
 | **Export DKK report** | Realized net proceeds, cost of shares sold, and profit/loss per ticker and year; respects the selected year |
 | **SQLite backup** | Complete ledger and cached rates |
 
-Data is stored in `ledger.sqlite3` beside `app.py` by default. To back up or move the complete ledger, stop the app and copy that file. To restore, stop the app and replace the database with the backup. CSV export is available, but **CSV import is not implemented**.
+On macOS, data is stored in `~/Library/Application Support/Stock Ledger/ledger.sqlite3`. On Windows the default is `%LOCALAPPDATA%\Stock Ledger\ledger.sqlite3`; on Linux it is `$XDG_DATA_HOME/stock-ledger/ledger.sqlite3` (or `~/.local/share/stock-ledger/ledger.sqlite3`). To back up or move the complete ledger, stop the app and copy that file. To restore, stop the app and replace the database with the backup. CSV export is available, but **CSV import is not implemented**.
 
 Database files, CSV exports, and common local artifacts are excluded by `.gitignore`. If using a custom database filename, ensure it is also ignored before committing.
 
@@ -122,7 +153,7 @@ Database files, CSV exports, and common local artifacts are excluded by `.gitign
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `8765` | Local HTTP port |
-| `LEDGER_DB` | `ledger.sqlite3` beside `app.py` | Database location; its parent directory must exist |
+| `LEDGER_DB` | Per-user application data folder | Absolute database path; the parent directory is created automatically |
 
 macOS / Linux:
 
@@ -154,6 +185,10 @@ fx.py           Nationalbank rate lookup and cache
 static/         HTML, CSS, and browser JavaScript
 test_app.py     Core accounting and persistence tests
 test_dkk.py     DKK conversion and migration tests
+storage.py      Durable data paths and legacy database migration
+desktop.py      Mac menu-bar app, instance lock, and browser launcher
+test_storage.py Storage migration, restart persistence, and launcher tests
+StockLedger.spec  PyInstaller Mac bundle configuration
 ```
 
 ## Scope and limitations

@@ -9,5 +9,5 @@ exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name='Stock Ledger',
           debug=False, strip=False, upx=False, console=False, target_arch='arm64')
 coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='Stock Ledger')
 app = BUNDLE(coll, name='Stock Ledger.app', bundle_identifier='dk.stockledger.desktop',
-             info_plist={'CFBundleShortVersionString':'1.0.1', 'CFBundleVersion':'2',
+             info_plist={'CFBundleShortVersionString':'1.0.2', 'CFBundleVersion':'3',
                          'LSUIElement':True, 'NSHighResolutionCapable':True})

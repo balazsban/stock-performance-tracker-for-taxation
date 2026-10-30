@@ -207,3 +207,7 @@ Review the calculations against your broker records and the rules applicable to 
 ## License
 
 [MIT](LICENSE). The repository's existing MIT license is preserved; it permits commercial as well as personal use, subject to its terms.
+
+### Full amounts in foreign currencies
+
+Choose **Convert full amount in original currency**, then enter the shares, currency and full amount paid including fees. For sales, enter the net amount received after fees. The saved Nationalbank exchange rate converts that total to DKK; fees are not added again. Each purchase contributes its own historical DKK cost to the weighted average, and sales use their own converted net proceeds. Original totals and rates remain available in the history and CSV export. Existing price-per-share entries remain supported.

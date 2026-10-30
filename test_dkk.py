@@ -37,6 +37,33 @@ class DKKTests(unittest.TestCase):
         with patch('fx.lookup',side_effect=AssertionError('Should use stored quote')):
             changed=app.prepare(dict(old,price='110',note='edited'),self.c,old)
         self.assertEqual(Decimal(changed['dkk_total']),7700)
+    def test_currency_totals_weighted_average_and_sale(self):
+        with patch('fx.lookup',return_value=dict(rate='7',rate_date='2025-01-02',source=fx.SOURCE)):
+            first=self.entry(1,fx_mode='total',currency_total='1010')
+        with patch('fx.lookup',return_value=dict(rate='6',rate_date='2025-01-03',source=fx.SOURCE)):
+            second=self.entry(2,fx_mode='total',currency_total='1200',date='2025-01-03')
+            sale=self.entry(3,fx_mode='total',currency_total='1500',side='SELL',date='2025-01-03')
+        report=app.portfolio_report([first,second,sale])
+        self.assertEqual(report['holdings'][0]['average'],Decimal('713.5'))
+        self.assertEqual(report['annual'][0]['profit'],Decimal('1865'))
+        self.assertEqual(first['price'],'')
+        self.assertEqual(first['fees'],'')
+        with self.c:
+            self.c.execute('INSERT INTO transactions ('+','.join(first)+') VALUES ('+','.join('?' for _ in first)+')',list(first.values()))
+        self.c.close(); self.c=app.connect()
+        saved=app.rows(self.c)[0]
+        self.assertEqual(saved['currency_total'],'1010')
+        with patch('fx.lookup',side_effect=AssertionError('Use stored rate')):
+            changed=app.prepare(dict(saved,currency_total='1100'),self.c,saved)
+        self.assertEqual(Decimal(changed['dkk_total']),7700)
+        with self.assertRaises(ValueError):
+            app.portfolio_report([first,dict(sale,quantity='11')])
+
+    def test_invalid_currency_totals(self):
+        with patch('fx.lookup',return_value=dict(rate='7',rate_date='2025-01-02',source=fx.SOURCE)):
+            for total in ['', 'NaN', '-1', 'Infinity', '1e25', '0.0000000000001']:
+                with self.assertRaises(ValueError): self.entry(1,fx_mode='total',currency_total=total)
+
     def test_missing_legacy_dkk_blocks_report(self):
         legacy=dict(id=1,**app.validate(dict(date='2025-01-02',ticker='ABC',currency='USD',side='BUY',quantity='1',price='10',fees='0',note='')))
         r=app.portfolio_report([legacy]);self.assertEqual(r['missing_dkk'],[1]);self.assertEqual(r['holdings'],[])

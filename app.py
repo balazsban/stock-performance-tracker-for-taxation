@@ -19,7 +19,7 @@ def connect():
     c.row_factory = sqlite3.Row
     c.execute('CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, ticker TEXT NOT NULL, currency TEXT NOT NULL, side TEXT NOT NULL, quantity TEXT NOT NULL, price TEXT NOT NULL, fees TEXT NOT NULL, note TEXT NOT NULL)')
     columns={r['name'] for r in c.execute('PRAGMA table_info(transactions)')}
-    for name in ['dkk_total','fx_mode','fx_rate','fx_date','fx_source','broker']:
+    for name in ['dkk_total','fx_mode','fx_rate','fx_date','fx_source','broker','currency_total']:
         if name not in columns: c.execute(f'ALTER TABLE transactions ADD COLUMN {name} TEXT')
     if 'sort_order' not in columns:
         c.execute('ALTER TABLE transactions ADD COLUMN sort_order INTEGER')
@@ -67,17 +67,19 @@ def calculate(rows):
 
 def prepare(d, c, previous=None):
     mode=d.get('fx_mode','auto')
-    if mode not in ['auto','manual']: raise ValueError('Choose final DKK amount or automatic conversion.')
+    if mode not in ['auto','manual','total']: raise ValueError('Choose final DKK amount, currency total, or price and fees.')
     normalized=dict(d)
     if mode=='manual':
         normalized['currency']=normalized.get('currency') or 'DKK'
         # Foreign-price fields are optional in final-DKK mode; never fabricate them.
         normalized['price']=normalized.get('price') or '0'
         normalized['fees']=normalized.get('fees') or '0'
+    if mode=='total':
+        normalized['price']='0'; normalized['fees']='0'
     out=validate(normalized)
     broker=str(d.get('broker','')).strip()
     if len(broker)>100: raise ValueError('Broker name must be at most 100 characters.')
-    out.update(broker=broker,fx_mode=mode)
+    out.update(broker=broker,fx_mode=mode,currency_total=None)
     if mode=='manual':
         try: total=Decimal(str(d.get('dkk_total','')))
         except InvalidOperation: raise ValueError('Enter the final amount in DKK.')
@@ -86,12 +88,20 @@ def prepare(d, c, previous=None):
         if not d.get('price'): out['price']=''
         if not d.get('fees'): out['fees']=''
     else:
-        if str(d.get('price','')).strip()=='': raise ValueError('Enter the original price per share for automatic conversion.')
-        if previous and previous.get('fx_mode')=='auto' and previous.get('fx_rate') and previous['date']==out['date'] and previous['currency']==out['currency']:
+        if mode=='auto' and str(d.get('price','')).strip()=='': raise ValueError('Enter the original price per share for automatic conversion.')
+        if previous and previous.get('fx_mode') in ['auto','total'] and previous.get('fx_rate') and previous['date']==out['date'] and previous['currency']==out['currency']:
             quote=dict(rate=previous['fx_rate'],rate_date=previous['fx_date'],source=previous['fx_source'])
         else: quote=fx.lookup(out['currency'],out['date'],c)
-        gross=Decimal(out['quantity'])*Decimal(out['price']); fees=Decimal(out['fees'])
-        total=(gross+fees if out['side']=='BUY' else gross-fees)*Decimal(quote['rate'])
+        if mode=='total':
+            try: original=Decimal(str(d.get('currency_total','')))
+            except InvalidOperation: raise ValueError('Enter the final amount in the original currency.')
+            if not original.is_finite() or original<0 or original>Decimal('1e24') or original.as_tuple().exponent < -12:
+                raise ValueError('Enter a nonnegative currency total with at most 12 decimals.')
+            out.update(currency_total=str(original),price='',fees='')
+        else:
+            gross=Decimal(out['quantity'])*Decimal(out['price']); fees=Decimal(out['fees'])
+            original=gross+fees if out['side']=='BUY' else gross-fees
+        total=original*Decimal(quote['rate'])
         out.update(dkk_total=str(total),fx_rate=quote['rate'],fx_date=quote['rate_date'],fx_source=quote['source'])
     return out
 
@@ -162,7 +172,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200,f.getvalue(),'text/csv')
         elif path == '/api/export':
             with connect() as c: data = rows(c)
-            f=io.StringIO(); w=csv.DictWriter(f,fieldnames=['id','date','ticker','currency','side','quantity','price','fees','note','dkk_total','fx_mode','fx_rate','fx_date','fx_source','broker','sort_order']); w.writeheader(); w.writerows(data)
+            f=io.StringIO(); w=csv.DictWriter(f,fieldnames=['id','date','ticker','currency','side','quantity','price','fees','note','dkk_total','fx_mode','fx_rate','fx_date','fx_source','broker','sort_order','currency_total']); w.writeheader(); w.writerows(data)
             self.send(200,f.getvalue(),'text/csv')
         elif path in ['/','/app.js','/style.css']:
             name = 'index.html' if path=='/' else path[1:]

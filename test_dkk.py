@@ -1,96 +1,67 @@
-import unittest, tempfile, json
-from unittest.mock import patch
+import sqlite3, tempfile, unittest
 from pathlib import Path
-from decimal import Decimal
-import app, fx
+from unittest.mock import patch
+import app
 
-class DKKTests(unittest.TestCase):
+class DKKMigrationTests(unittest.TestCase):
     def setUp(self):
-        self.tmp=tempfile.TemporaryDirectory(); self.old=app.DB; app.DB=Path(self.tmp.name)/'db.sqlite3'; self.c=app.connect()
+        self.tmp=tempfile.TemporaryDirectory(); self.old=app.DB; app.DB=Path(self.tmp.name)/'ledger.sqlite3'
     def tearDown(self):
-        self.c.close(); app.DB=self.old; self.tmp.cleanup()
-    def entry(self, i, **changes):
-        raw=dict(date='2025-01-02',ticker='ABC',currency='USD',side='BUY',quantity='10',price='100',fees='10',note='',broker='IBKR',fx_mode='manual',dkk_total='7000')
-        raw.update(changes)
-        return dict(id=i,**app.prepare(raw,self.c))
-    def test_final_amount_not_double_charged_and_mixed_currencies(self):
-        purchase=self.entry(1,fees='500',currency='DKK',broker='Danish broker')
-        sale=self.entry(2,side='SELL',quantity='5',dkk_total='4000',fees='200',date='2026-01-01')
-        r=app.portfolio_report([purchase,sale])
-        self.assertEqual(r['holdings'][0]['basis'],3500)
-        self.assertEqual(r['holdings'][0]['average'],700)
-        self.assertEqual(r['annual'][0]['profit'],500)
-        self.assertEqual(r['annual'][0]['currency'],'DKK')
-    def test_manual_dkk_only_no_fabricated_foreign_price(self):
-        t=self.entry(1,price='',fees='',currency='DKK')
-        self.assertEqual(t['price'],''); self.assertEqual(t['fees'],'')
-        self.assertEqual(app.portfolio_report([t])['holdings'][0]['basis'],7000)
-    def test_each_transaction_uses_its_own_rate(self):
-        with patch('fx.lookup',return_value=dict(rate='7',rate_date='2025-01-02',source=fx.SOURCE)):
-            buy=self.entry(1,fx_mode='auto',fees='0')
-        with patch('fx.lookup',return_value=dict(rate='6',rate_date='2025-01-03',source=fx.SOURCE)):
-            sale=self.entry(2,fx_mode='auto',side='SELL',price='120',fees='0',date='2025-01-03')
-        self.assertEqual(app.portfolio_report([buy,sale])['annual'][0]['profit'],200)
-    def test_edit_preserves_saved_rate(self):
-        with patch('fx.lookup',return_value=dict(rate='7',rate_date='2025-01-02',source=fx.SOURCE)):
-            old=self.entry(1,fx_mode='auto',fees='0')
-        with patch('fx.lookup',side_effect=AssertionError('Should use stored quote')):
-            changed=app.prepare(dict(old,price='110',note='edited'),self.c,old)
-        self.assertEqual(Decimal(changed['dkk_total']),7700)
-    def test_currency_totals_weighted_average_and_sale(self):
-        with patch('fx.lookup',return_value=dict(rate='7',rate_date='2025-01-02',source=fx.SOURCE)):
-            first=self.entry(1,fx_mode='total',currency_total='1010')
-        with patch('fx.lookup',return_value=dict(rate='6',rate_date='2025-01-03',source=fx.SOURCE)):
-            second=self.entry(2,fx_mode='total',currency_total='1200',date='2025-01-03')
-            sale=self.entry(3,fx_mode='total',currency_total='1500',side='SELL',date='2025-01-03')
-        report=app.portfolio_report([first,second,sale])
-        self.assertEqual(report['holdings'][0]['average'],Decimal('713.5'))
-        self.assertEqual(report['annual'][0]['profit'],Decimal('1865'))
-        self.assertEqual(first['price'],'')
-        self.assertEqual(first['fees'],'')
-        with self.c:
-            self.c.execute('INSERT INTO transactions ('+','.join(first)+') VALUES ('+','.join('?' for _ in first)+')',list(first.values()))
-        self.c.close(); self.c=app.connect()
-        saved=app.rows(self.c)[0]
-        self.assertEqual(saved['currency_total'],'1010')
-        with patch('fx.lookup',side_effect=AssertionError('Use stored rate')):
-            changed=app.prepare(dict(saved,currency_total='1100'),self.c,saved)
-        self.assertEqual(Decimal(changed['dkk_total']),7700)
-        with self.assertRaises(ValueError):
-            app.portfolio_report([first,dict(sale,quantity='11')])
-
-    def test_invalid_currency_totals(self):
-        with patch('fx.lookup',return_value=dict(rate='7',rate_date='2025-01-02',source=fx.SOURCE)):
-            for total in ['', 'NaN', '-1', 'Infinity', '1e25', '0.0000000000001']:
-                with self.assertRaises(ValueError): self.entry(1,fx_mode='total',currency_total=total)
-
-    def test_missing_legacy_dkk_blocks_report(self):
-        legacy=dict(id=1,**app.validate(dict(date='2025-01-02',ticker='ABC',currency='USD',side='BUY',quantity='1',price='10',fees='0',note='')))
-        r=app.portfolio_report([legacy]);self.assertEqual(r['missing_dkk'],[1]);self.assertEqual(r['holdings'],[])
-        legacy['currency']='DKK';r=app.portfolio_report([legacy]);self.assertEqual(r['holdings'][0]['basis'],10)
-    def test_oversell_across_brokers(self):
-        with self.assertRaises(ValueError):app.portfolio_report([self.entry(1),self.entry(2,side='SELL',quantity='11')])
-    def test_invalid_manual_total(self):
-        for total in ['','NaN','-1','Infinity']:
-            with self.assertRaises(ValueError):self.entry(1,dkk_total=total)
-    def test_rate_scaling_weekend_and_cache(self):
-        info={'variables':[{'id':'VALUTA','values':[{'id':'USD'}]},{'id':'Tid','values':[{'id':'2025M01D03'}]}]}
-        response='VALUTA;KURTYP;TID;INDHOLD\nUSD;KBH;2025M01D03;724.3300\n'
-        with patch('fx.fetch',side_effect=[json.dumps(info),response]) as mock:
-            q=fx.lookup('USD','2025-01-05',self.c)
-            self.assertEqual(q['rate'],'7.2433'); self.assertEqual(q['rate_date'],'2025-01-03')
-            self.assertEqual(fx.lookup('USD','2025-01-05',self.c),q);self.assertEqual(mock.call_count,2)
-    def test_missing_banking_day_not_silently_replaced(self):
-        info={'variables':[{'id':'VALUTA','values':[{'id':'USD'}]},{'id':'Tid','values':[{'id':'2025M01D02'}]}]}
-        with patch('fx.fetch',return_value=json.dumps(info)):
-            with self.assertRaisesRegex(ValueError,'not been published'):fx.lookup('USD','2025-01-03',self.c)
-    def test_future_and_unsupported(self):
-        with self.assertRaises(ValueError):fx.lookup('USD','2099-01-01',self.c)
-        with self.assertRaises(ValueError):fx.lookup('badcode','2025-01-01',self.c)
-    def test_migration_preserves_existing_records(self):
-        self.c.close();app.DB=Path(self.tmp.name)/'old.sqlite3'
-        import sqlite3
-        c=sqlite3.connect(app.DB);c.execute('CREATE TABLE transactions (id INTEGER PRIMARY KEY,date TEXT,ticker TEXT,currency TEXT,side TEXT,quantity TEXT,price TEXT,fees TEXT,note TEXT)')
-        c.execute("INSERT INTO transactions VALUES (1,'2025-01-01','ABC','USD','BUY','10','20','1','old note')");c.commit();c.close()
-        self.c=app.connect();r=app.rows(self.c);self.assertEqual(r[0]['note'],'old note');self.assertIsNone(r[0]['dkk_total'])
-if __name__=='__main__':unittest.main()
+        app.DB=self.old;self.tmp.cleanup()
+    def legacy(self):
+        c=sqlite3.connect(app.DB)
+        c.execute("CREATE TABLE transactions (id INTEGER PRIMARY KEY AUTOINCREMENT,date TEXT,ticker TEXT,currency TEXT,side TEXT,quantity TEXT,price TEXT,fees TEXT,note TEXT,dkk_total TEXT,fx_mode TEXT,fx_rate TEXT,fx_date TEXT,fx_source TEXT,broker TEXT,sort_order INTEGER,currency_total TEXT)")
+        c.execute("CREATE TABLE fx_cache(currency TEXT,rate TEXT)")
+        c.execute("INSERT INTO fx_cache VALUES ('USD','7')")
+        c.execute("INSERT INTO transactions VALUES (4,'2025-01-01','ABC','USD','BUY','10','100','10','original note','7070','total','7','2025-01-01','Nationalbank','IBKR',5,'1010')")
+        c.execute("INSERT INTO transactions VALUES (7,'2025-01-02','ABC','EUR','SELL','5','','','','4000','manual',NULL,NULL,'Broker final DKK amount','Broker',8,NULL)")
+        c.execute("UPDATE sqlite_sequence SET seq=20 WHERE name='transactions'")
+        c.commit();c.close()
+    def test_migration_preserves_accounting_and_order_removes_fx_and_backs_up(self):
+        self.legacy()
+        with app.connect() as c:
+            records=app.rows(c);r=app.portfolio_report(records)
+            self.assertEqual(r['holdings'][0]['basis'],3535)
+            self.assertEqual(r['annual'][0]['profit'],465)
+            self.assertEqual([t['sort_order'] for t in records],[5,8])
+            self.assertEqual(records[0]['note'],'original note')
+            self.assertEqual(records[0]['broker'],'IBKR')
+            self.assertEqual(set(records[0]),{'id','date','ticker','side','quantity','dkk_total','broker','note','sort_order'})
+            self.assertFalse(c.execute("SELECT 1 FROM sqlite_master WHERE name='fx_cache'").fetchone())
+            self.assertEqual(c.execute("SELECT seq FROM sqlite_sequence WHERE name='transactions'").fetchone()[0],20)
+        backups=list(Path(self.tmp.name).glob('*.before-dkk-only-*.sqlite3'))
+        self.assertEqual(len(backups),1)
+        with sqlite3.connect(backups[0]) as c:
+            self.assertEqual(c.execute('SELECT currency FROM transactions WHERE id=4').fetchone()[0],'USD')
+            self.assertEqual(c.execute('SELECT count(*) FROM fx_cache').fetchone()[0],1)
+        with app.connect() as c:self.assertEqual(len(app.rows(c)),2)
+        self.assertEqual(len(list(Path(self.tmp.name).glob('*.before-dkk-only-*.sqlite3'))),1)
+    def test_missing_dkk_not_guessed_and_legacy_dkk_total_derived(self):
+        self.legacy()
+        with sqlite3.connect(app.DB) as c:
+            c.execute("UPDATE transactions SET dkk_total=NULL,currency='DKK' WHERE id=4")
+            c.execute("UPDATE transactions SET dkk_total=NULL WHERE id=7")
+        with app.connect() as c:
+            records=app.rows(c)
+            self.assertEqual(records[0]['dkk_total'],'1010')
+            r=app.portfolio_report(records)
+            self.assertEqual(r['missing_dkk'],[7]);self.assertEqual(r['holdings'],[])
+            self.assertTrue(all(t['profit'] is None for t in r['transactions']))
+    def test_failed_backup_keeps_old_schema(self):
+        self.legacy()
+        with patch('storage.sqlite3.connect',side_effect=OSError('backup unavailable')):
+            with self.assertRaises(OSError):
+                c=sqlite3.connect  # patched connection is not used to open the app connection below
+                # Use a connection created by the saved module's real function via a separate fixture.
+                import _sqlite3
+                conn=_sqlite3.connect(app.DB);conn.row_factory=sqlite3.Row
+                try: app.storage.migrate_dkk_schema(conn,app.DB)
+                finally: conn.close()
+        with sqlite3.connect(app.DB) as c:
+            self.assertIn('currency',[r[1] for r in c.execute('PRAGMA table_info(transactions)')])
+            self.assertEqual(c.execute('SELECT count(*) FROM transactions').fetchone()[0],2)
+    def test_validation_requires_final_dkk_amount(self):
+        base=dict(date='2025-01-01',ticker='abc',side='BUY',quantity='10',dkk_total='1234')
+        self.assertEqual(app.validate(base)['ticker'],'ABC')
+        for amount in ['',None,'NaN','Infinity','-1','1e25','0.0000000000001']:
+            with self.assertRaises(ValueError):app.validate(dict(base,dkk_total=amount))

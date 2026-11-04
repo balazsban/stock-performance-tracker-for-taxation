@@ -52,8 +52,6 @@ def open_browser(url):
 
 
 def main():
-    import certifi
-    os.environ.setdefault('SSL_CERT_FILE', certifi.where())
     import rumps
     import app
     database = app.DB

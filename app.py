@@ -4,7 +4,6 @@ from decimal import Decimal, InvalidOperation, getcontext, DefaultContext
 from datetime import date
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-import fx
 import storage
 import logging
 DefaultContext.prec = 40
@@ -17,40 +16,35 @@ def connect():
         storage.prepare_database(DB, ROOT / 'ledger.sqlite3' if not os.environ.get('LEDGER_DB') else None)
     c = sqlite3.connect(DB)
     c.row_factory = sqlite3.Row
-    c.execute('CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, ticker TEXT NOT NULL, currency TEXT NOT NULL, side TEXT NOT NULL, quantity TEXT NOT NULL, price TEXT NOT NULL, fees TEXT NOT NULL, note TEXT NOT NULL)')
-    columns={r['name'] for r in c.execute('PRAGMA table_info(transactions)')}
-    for name in ['dkk_total','fx_mode','fx_rate','fx_date','fx_source','broker','currency_total']:
-        if name not in columns: c.execute(f'ALTER TABLE transactions ADD COLUMN {name} TEXT')
-    if 'sort_order' not in columns:
-        c.execute('ALTER TABLE transactions ADD COLUMN sort_order INTEGER')
-    c.execute('UPDATE transactions SET sort_order=id WHERE sort_order IS NULL')
-    c.execute('CREATE TABLE IF NOT EXISTS fx_cache (currency TEXT, trade_date TEXT, rate_date TEXT, rate TEXT, source TEXT, PRIMARY KEY(currency,trade_date))')
-    c.commit()
+    storage.migrate_dkk_schema(c, DB)
     return c
 
 def validate(d):
-    out = {k: str(d.get(k, '')).strip() for k in ['date','ticker','currency','side','quantity','price','fees','note']}
+    out = {k: str(d.get(k, '')).strip() for k in ['date','ticker','side','quantity','dkk_total','note','broker']}
     if date.fromisoformat(out['date']).isoformat() != out['date']: raise ValueError('Use a valid YYYY-MM-DD date.')
-    out['ticker'] = out['ticker'].upper(); out['currency'] = out['currency'].upper()
+    out['ticker'] = out['ticker'].upper()
     if not re.fullmatch(r'[A-Z0-9.^:_/-]{1,24}', out['ticker']): raise ValueError('Enter a valid ticker (up to 24 characters).')
-    if not re.fullmatch(r'[A-Z]{3}', out['currency']): raise ValueError('Currency must have three letters, e.g. USD.')
     if out['side'] not in ['BUY','SELL']: raise ValueError('Choose buy or sell.')
-    for k in ['quantity','price','fees']:
-        n = Decimal(out[k] or '0')
-        if not n.is_finite() or n < 0 or n > Decimal('1e18') or (k == 'quantity' and n == 0) or n.as_tuple().exponent < -12: raise ValueError(f'Invalid {k}: use a positive quantity and nonnegative prices/fees, with up to 12 decimals.')
-        out[k] = str(n)
-    if len(out['note']) > 500: raise ValueError('Notes must be at most 500 characters.')
+    for k in ['quantity','dkk_total']:
+        try: n = Decimal(out[k])
+        except InvalidOperation: raise ValueError('Enter shares and the final DKK amount.')
+        limit=Decimal('1e18') if k=='quantity' else Decimal('1e24')
+        if not n.is_finite() or n<0 or n>limit or (k=='quantity' and n==0) or n.as_tuple().exponent < -12:
+            raise ValueError(f'Invalid {k}: use a positive share quantity and a nonnegative DKK amount, with up to 12 decimals.')
+        out[k]=str(n)
+    if len(out['note'])>500: raise ValueError('Notes must be at most 500 characters.')
+    if len(out['broker'])>100: raise ValueError('Broker name must be at most 100 characters.')
     return out
 
 def calculate(rows):
     positions, annual, realized, history = {}, {}, {}, []
     for raw in sorted(rows, key=lambda t:(t['date'],t.get('sort_order') if t.get('sort_order') is not None else t['id'],t['id'])):
-        t = dict(raw); key = (t['ticker'], t['currency'])
+        t = dict(raw); key = (t['ticker'], 'DKK')
         p = positions.setdefault(key, {'ticker':key[0], 'currency':key[1], 'quantity':Decimal(0), 'basis':Decimal(0)})
-        q, price, fee = (Decimal(t[k]) for k in ['quantity','price','fees'])
+        q = Decimal(t['quantity'])
         avg = p['basis'] / p['quantity'] if p['quantity'] else Decimal(0)
         gain = None
-        total = Decimal(t['_total']) if t.get('_total') is not None else (q*price+fee if t['side']=='BUY' else q*price-fee)
+        total = Decimal(t.get('dkk_total') or '0')
         if t['side'] == 'BUY': p['quantity'] += q; p['basis'] += total
         else:
             if q > p['quantity']: raise ValueError(f"{t['date']}: sale of {q} {key[0]} exceeds available {p['quantity']} shares ({key[1]}).")
@@ -66,64 +60,15 @@ def calculate(rows):
     return {'holdings':holdings,'annual':list(annual.values()),'realized':[{'ticker':k[0],'currency':k[1],'profit':v} for k,v in realized.items()], 'transactions':list(reversed(history))}
 
 def prepare(d, c, previous=None):
-    mode=d.get('fx_mode','auto')
-    if mode not in ['auto','manual','total']: raise ValueError('Choose final DKK amount, currency total, or price and fees.')
-    normalized=dict(d)
-    if mode=='manual':
-        normalized['currency']=normalized.get('currency') or 'DKK'
-        # Foreign-price fields are optional in final-DKK mode; never fabricate them.
-        normalized['price']=normalized.get('price') or '0'
-        normalized['fees']=normalized.get('fees') or '0'
-    if mode=='total':
-        normalized['price']='0'; normalized['fees']='0'
-    out=validate(normalized)
-    broker=str(d.get('broker','')).strip()
-    if len(broker)>100: raise ValueError('Broker name must be at most 100 characters.')
-    out.update(broker=broker,fx_mode=mode,currency_total=None)
-    if mode=='manual':
-        try: total=Decimal(str(d.get('dkk_total','')))
-        except InvalidOperation: raise ValueError('Enter the final amount in DKK.')
-        if not total.is_finite() or total<0 or total>Decimal('1e24') or total.as_tuple().exponent < -12: raise ValueError('Enter a nonnegative final DKK amount with at most 12 decimals.')
-        out.update(dkk_total=str(total),fx_rate=None,fx_date=None,fx_source='Broker final DKK amount')
-        if not d.get('price'): out['price']=''
-        if not d.get('fees'): out['fees']=''
-    else:
-        if mode=='auto' and str(d.get('price','')).strip()=='': raise ValueError('Enter the original price per share for automatic conversion.')
-        if previous and previous.get('fx_mode') in ['auto','total'] and previous.get('fx_rate') and previous['date']==out['date'] and previous['currency']==out['currency']:
-            quote=dict(rate=previous['fx_rate'],rate_date=previous['fx_date'],source=previous['fx_source'])
-        else: quote=fx.lookup(out['currency'],out['date'],c)
-        if mode=='total':
-            try: original=Decimal(str(d.get('currency_total','')))
-            except InvalidOperation: raise ValueError('Enter the final amount in the original currency.')
-            if not original.is_finite() or original<0 or original>Decimal('1e24') or original.as_tuple().exponent < -12:
-                raise ValueError('Enter a nonnegative currency total with at most 12 decimals.')
-            out.update(currency_total=str(original),price='',fees='')
-        else:
-            gross=Decimal(out['quantity'])*Decimal(out['price']); fees=Decimal(out['fees'])
-            original=gross+fees if out['side']=='BUY' else gross-fees
-        total=original*Decimal(quote['rate'])
-        out.update(dkk_total=str(total),fx_rate=quote['rate'],fx_date=quote['rate_date'],fx_source=quote['source'])
-    return out
+    return validate(d)
 
 def portfolio_report(records):
-    converted=[]; missing=[]
-    for raw in records:
-        t=dict(raw); total=t.get('dkk_total')
-        if total is None and t['currency']=='DKK':
-            gross=Decimal(t['quantity'])*Decimal(t['price']); fees=Decimal(t['fees'])
-            total=str(gross+fees if t['side']=='BUY' else gross-fees)
-            t.update(dkk_total=total,fx_mode='auto',fx_rate='1',fx_date=t['date'],fx_source='DKK (no conversion)')
-        if total is None: missing.append(t['id'])
-        converted.append(dict(t,currency='DKK',price='0',fees='0',_total=total or '0',original=t))
-    report=calculate(converted) # All currencies and brokers for a ticker share its DKK cost basis.
-    history=[]
-    for t in report['transactions']:
-        history.append(dict(t['original'],profit=t['profit'] if not missing else None,average=t['average'] if not missing else None,remaining=t['remaining']))
-    report['transactions']=history
+    missing=[t['id'] for t in records if t.get('dkk_total') is None]
+    report=calculate(records)
     report['missing_dkk']=missing
     if missing:
-        # Never display incomplete figures as final DKK results.
         report.update(holdings=[],annual=[],realized=[])
+        for t in report['transactions']: t.update(profit=None,average=None)
     return report
 
 
@@ -157,12 +102,6 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == '/api/portfolio':
             with connect() as c: self.send(200,portfolio_report(rows(c)))
-        elif path == '/api/fx':
-            try:
-                args=parse_qs(urlparse(self.path).query)
-                with connect() as c: quote=fx.lookup(args.get('currency',[''])[0],args.get('date',[''])[0],c)
-                self.send(200,quote)
-            except ValueError as e: self.send(400,{'error':str(e)})
         elif path == '/api/report':
             with connect() as c: report=portfolio_report(rows(c))
             if report['missing_dkk']: return self.send(400,{'error':'Complete the missing DKK amounts before exporting the report.'})
@@ -172,7 +111,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200,f.getvalue(),'text/csv')
         elif path == '/api/export':
             with connect() as c: data = rows(c)
-            f=io.StringIO(); w=csv.DictWriter(f,fieldnames=['id','date','ticker','currency','side','quantity','price','fees','note','dkk_total','fx_mode','fx_rate','fx_date','fx_source','broker','sort_order','currency_total']); w.writeheader(); w.writerows(data)
+            f=io.StringIO(); w=csv.DictWriter(f,fieldnames=['id','date','ticker','side','quantity','dkk_total','broker','note','sort_order']); w.writeheader(); w.writerows(data)
             self.send(200,f.getvalue(),'text/csv')
         elif path in ['/','/app.js','/style.css']:
             name = 'index.html' if path=='/' else path[1:]

@@ -48,7 +48,7 @@ def prepare_database(target, legacy=None):
                 if source.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise ValueError('Legacy database integrity check failed; the original has not been changed.')
                 columns={r[1] for r in source.execute('PRAGMA table_info(transactions)')}
-                if not {'id','date','ticker','side','quantity','price','fees'}.issubset(columns):
+                if not {'id','date','ticker','side','quantity'}.issubset(columns):
                     raise ValueError('The selected database is not a Stock Ledger database.')
                 with sqlite3.connect(temporary) as dest:
                     source.backup(dest)
@@ -59,3 +59,43 @@ def prepare_database(target, legacy=None):
             if os.path.exists(temporary):
                 os.unlink(temporary)
     return True
+
+
+def migrate_dkk_schema(c, database):
+    """Preserve saved DKK totals and trade IDs; back up before removing FX data."""
+    from decimal import Decimal
+    from datetime import datetime
+    schema = "CREATE TABLE transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, ticker TEXT NOT NULL, side TEXT NOT NULL, quantity TEXT NOT NULL, dkk_total TEXT, broker TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL)"
+    columns={r[1] for r in c.execute('PRAGMA table_info(transactions)')}
+    if not columns:
+        c.execute(schema); c.commit(); return
+    if not (columns & {'currency','price','fees','fx_mode','fx_rate','fx_date','fx_source','currency_total'}):
+        return
+    # Hold a write reservation while a separate read connection takes a consistent backup.
+    c.execute('BEGIN IMMEDIATE')
+    try:
+        backup=Path(str(database)+'.before-dkk-only-'+datetime.now().strftime('%Y%m%d-%H%M%S-%f')+'.sqlite3')
+        with sqlite3.connect(Path(database).resolve().as_uri()+'?mode=ro',uri=True) as source:
+            with sqlite3.connect(backup) as dest:
+                source.backup(dest)
+                if dest.execute('PRAGMA quick_check').fetchone()[0]!='ok':
+                    raise ValueError('Database backup failed integrity check.')
+        old=[dict(r) for r in c.execute('SELECT * FROM transactions')]
+        sequence=c.execute("SELECT seq FROM sqlite_sequence WHERE name='transactions'").fetchone() if c.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_sequence'").fetchone() else None
+        c.execute('ALTER TABLE transactions RENAME TO old_transactions')
+        c.execute(schema)
+        for t in old:
+            total=t.get('dkk_total')
+            if total is None and t.get('currency')=='DKK':
+                gross=Decimal(t['quantity'])*Decimal(t['price']); fees=Decimal(t.get('fees') or '0')
+                total=str(gross+fees if t['side']=='BUY' else gross-fees)
+            c.execute('INSERT INTO transactions VALUES (?,?,?,?,?,?,?,?,?)',
+                (t['id'],t['date'],t['ticker'],t['side'],t['quantity'],total,t.get('broker') or '',t.get('note') or '',t.get('sort_order') if t.get('sort_order') is not None else t['id']))
+        if sequence:
+            c.execute("DELETE FROM sqlite_sequence WHERE name='transactions'")
+            c.execute("INSERT INTO sqlite_sequence(name,seq) VALUES ('transactions',?)",(max(sequence[0],max((t['id'] for t in old),default=0)),))
+        c.execute('DROP TABLE old_transactions')
+        c.execute('DROP TABLE IF EXISTS fx_cache')
+        c.commit()
+    except Exception:
+        c.rollback(); raise

@@ -9,7 +9,7 @@ class ReorderTests(unittest.TestCase):
         app.DB=self.old;self.tmp.cleanup()
     def add(self,side,amount,day='2025-01-02',ticker='ABC'):
         with app.connect() as c:
-            d=app.prepare(dict(date=day,ticker=ticker,currency='DKK',side=side,quantity='10',fx_mode='manual',dkk_total=str(amount),note=''),c)
+            d=app.prepare(dict(date=day,ticker=ticker,side=side,quantity='10',dkk_total=str(amount),note=''),c)
             d['sort_order']=c.execute('SELECT COALESCE(MAX(sort_order),0)+1 FROM transactions').fetchone()[0]
             return c.execute('INSERT INTO transactions ('+','.join(d)+') VALUES ('+','.join('?' for _ in d)+')',list(d.values())).lastrowid
     def move(self,ids,expected,ticker='ABC',day='2025-01-02'):

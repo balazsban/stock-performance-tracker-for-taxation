@@ -62,7 +62,7 @@ class StorageTests(unittest.TestCase):
                 try:
                     url = process.stdout.readline().strip().split()[-1]
                     if run == 0:
-                        transaction=dict(date='2025-01-01',ticker='RESTART',currency='DKK',side='BUY',quantity='2',fx_mode='manual',dkk_total='1234',note='restart check')
+                        transaction=dict(date='2025-01-01',ticker='RESTART',side='BUY',quantity='2',dkk_total='1234',note='restart check')
                         request=urllib.request.Request(url+'/api/transactions',data=json.dumps(transaction).encode(),headers={'Content-Type':'application/json'})
                         with urllib.request.urlopen(request,timeout=5) as response:
                             self.assertEqual(response.status,200)
